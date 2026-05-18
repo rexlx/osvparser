@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/syslog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -70,6 +71,7 @@ func main() {
 	dirPtr := flag.String("dir", ".", "Directory containing OSV JSON results")
 	csvPtr := flag.Bool("csv", false, "Output results to osv_results.csv")
 	verbosePtr := flag.Bool("verbose", false, "Include UNKNOWN severity results")
+	syslogPtr := flag.String("syslog", "", "Syslog server URL:port combo (e.g., localhost:514)")
 	flag.Parse()
 
 	var allFindings []Finding
@@ -125,6 +127,11 @@ func main() {
 		return allFindings[i].Package < allFindings[j].Package
 	})
 
+	// Trigger Syslog output if flag is provided and non-empty
+	if *syslogPtr != "" {
+		sendToSyslog(allFindings, *syslogPtr)
+	}
+
 	if *csvPtr {
 		writeCSV(allFindings)
 	} else {
@@ -158,4 +165,33 @@ func writeCSV(findings []Finding) {
 		writer.Write([]string{f.Severity, f.ID, f.Package, f.Source})
 	}
 	fmt.Println("Results successfully written to osv_results.csv")
+}
+
+func sendToSyslog(findings []Finding, addr string) {
+	// Establish UDP connection to remote syslog with process name 'vuln-scanner'
+	writer, err := syslog.Dial("udp", addr, syslog.LOG_INFO|syslog.LOG_LOCAL0, "sadom-vuln-scanner")
+	if err != nil {
+		fmt.Printf("Failed to connect to syslog server: %v\n", err)
+		return
+	}
+	defer writer.Close()
+
+	for _, f := range findings {
+		msg := fmt.Sprintf("Severity: %s | ID: %s | Package: %s | Source: %s", f.Severity, f.ID, f.Package, f.Source)
+
+		// Dynamically route logs to appropriate syslog severity levels
+		switch f.Severity {
+		case "CRITICAL":
+			writer.Crit(msg)
+		case "HIGH":
+			writer.Err(msg)
+		case "MODERATE", "MEDIUM":
+			writer.Warning(msg)
+		case "LOW":
+			writer.Info(msg)
+		default:
+			writer.Notice(msg)
+		}
+	}
+	fmt.Printf("Successfully forwarded %d findings to syslog at %s\n", len(findings), addr)
 }
